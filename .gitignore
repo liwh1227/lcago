@@ -2,3 +2,4 @@
 .idea
 *.log
 logs
+*_test.go
