@@ -1,29 +1,26 @@
 package log
 
 import (
-	"context"
-	//"github.com/sirupsen/logrus"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/natefinch/lumberjack"
+	rotatelogs "github.com/lestrrat/go-file-rotatelogs"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 var (
-	l *Logger
-	// IO输出
-	outWrite zapcore.WriteSyncer
-	// 控制台标准输出
-	debugConsole = zapcore.Lock(os.Stdout)
-	once         sync.Once
+	l                              *Logger
+	outWrite                       zapcore.WriteSyncer
+	errWs, warnWs, infoWs, debugWs zapcore.WriteSyncer
+	once                           sync.Once
+	debugConsole                   = zapcore.Lock(os.Stdout) // 控制台标准输出
 )
 
 type Logger struct {
-	*zap.Logger
+	*zap.SugaredLogger
 	opts      *Options
 	zapConfig zap.Config
 }
@@ -39,8 +36,25 @@ func NewLogger(opts ...LoggerOptions) {
 	})
 }
 
-// Log 封装的日志服务
-func Log() *Logger {
+// loadCfg 加载zap的配置项
+func (l *Logger) loadCfg() {
+	// 1.开发模式
+	l.loadDevModeCfg()
+}
+
+// loadDevModeDev 加载当前的开发环境
+func (l *Logger) loadDevModeCfg() {
+	if l.opts.Development {
+		l.zapConfig = zap.NewDevelopmentConfig()
+		l.zapConfig.EncoderConfig.EncodeTime = timeEncoder
+	} else {
+		l.zapConfig = zap.NewProductionConfig()
+		l.zapConfig.EncoderConfig.EncodeTime = timeEncoder
+	}
+}
+
+// getLogInstance 封装的日志服务
+func getLogInstance() *Logger {
 	if l == nil {
 		panic("Please initialize the log service first")
 		return nil
@@ -48,38 +62,15 @@ func Log() *Logger {
 	return l
 }
 
-func (l *Logger) GetCtx(ctx context.Context) *zap.Logger {
-	log, ok := ctx.Value(l.opts.CtxKey).(*zap.Logger)
-	if ok {
-		return log
-	}
-	return l.Logger
-}
-
-func (l *Logger) WithContext(ctx context.Context) *zap.Logger {
-	log, ok := ctx.Value(l.opts.CtxKey).(*zap.Logger)
-	if ok {
-		return log
-	}
-	return l.Logger
-}
-
-// AddCtx 添加上下文
-func (l *Logger) AddCtx(ctx context.Context, field ...zap.Field) (context.Context, *zap.Logger) {
-	log := l.With(field...)
-	ctx = context.WithValue(ctx, l.opts.CtxKey, log)
-	return ctx, log
-}
-
 // initLog 初始化日志
 func (l *Logger) initLog() {
 	l.setSyncers()
-	var err error
-	l.Logger, err = l.zapConfig.Build(l.cores())
+	logger, err := l.zapConfig.Build(l.cores())
 	if err != nil {
 		panic(err)
 	}
-	defer l.Logger.Sync()
+	l.SugaredLogger = logger.Sugar()
+	defer l.SugaredLogger.Sync()
 }
 
 // GetLevel 获取日志级别
@@ -104,32 +95,29 @@ func (l *Logger) GetLevel() (level zapcore.Level) {
 	}
 }
 
-func (l *Logger) loadCfg() {
-	if l.opts.Development {
-		//l.zapConfig = zap.NewDevelopmentConfig()
-		l.zapConfig.EncoderConfig.EncodeTime = timeEncoder
-	} else {
-		//l.zapConfig = zap.NewProductionConfig()
-		l.zapConfig.EncoderConfig.EncodeTime = timeUnixNano
-	}
-}
-
 // setSyncers 同步日志设置
 func (l *Logger) setSyncers() {
-	outWrite = zapcore.AddSync(&lumberjack.Logger{
-		Filename:   l.opts.LogFileDir + "/" + l.opts.ServiceName + ".log",
-		MaxSize:    l.opts.MaxSize,
-		MaxBackups: l.opts.MaxBackups,
-		MaxAge:     l.opts.MaxAge,
-		Compress:   true,
-		LocalTime:  true,
-	})
+	f := func(fN string) zapcore.WriteSyncer {
+		logf, _ := rotatelogs.New(l.opts.LogFileDir+l.opts.ServiceName+"-"+fN+".%Y-%m-%d-%H"+".log",
+			rotatelogs.WithLinkName(l.opts.LogFileDir+l.opts.ServiceName+"-"+fN),
+			rotatelogs.WithMaxAge(30*24*time.Hour),
+			rotatelogs.WithRotationTime(time.Minute),
+		)
+		return zapcore.AddSync(logf)
+	}
+
+	errWs = f(l.opts.ErrorFileName)
+	warnWs = f(l.opts.WarnFileName)
+	infoWs = f(l.opts.InfoFileName)
+	debugWs = f(l.opts.DebugFileName)
+	outWrite = f("app")
+
 	return
 }
 
+// cores zap日志切割
 func (l *Logger) cores() zap.Option {
 	encoder := zapcore.NewJSONEncoder(l.zapConfig.EncoderConfig)
-
 	priority := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
 		return lvl >= l.GetLevel()
 	})
@@ -144,6 +132,30 @@ func (l *Logger) cores() zap.Option {
 			zapcore.NewCore(encoder, debugConsole, priority),
 		}...)
 	}
+	// 是否将日志按不同的级别输出至不同日志
+	errPriority := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
+		return lvl > zapcore.WarnLevel && zapcore.WarnLevel-l.zapConfig.Level.Level() > -1
+	})
+	warnPriority := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
+		return lvl == zapcore.WarnLevel && zapcore.WarnLevel-l.zapConfig.Level.Level() > -1
+	})
+	infoPriority := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
+		return lvl == zapcore.InfoLevel && zapcore.InfoLevel-l.zapConfig.Level.Level() > -1
+	})
+	debugPriority := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
+		return lvl == zapcore.DebugLevel && zapcore.DebugLevel-l.zapConfig.Level.Level() > -1
+	})
+
+	// 是否开启按日志级别进行切割
+	if l.opts.WriteWithLevel {
+		cores = append(cores, []zapcore.Core{
+			zapcore.NewCore(encoder, errWs, errPriority),
+			zapcore.NewCore(encoder, warnWs, warnPriority),
+			zapcore.NewCore(encoder, infoWs, infoPriority),
+			zapcore.NewCore(encoder, debugWs, debugPriority),
+		}...)
+	}
+
 	return zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(cores...)
 	})

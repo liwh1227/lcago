@@ -1,6 +1,10 @@
 package log
 
-import "path/filepath"
+import (
+	"path/filepath"
+)
+
+var sp = string(filepath.Separator)
 
 type Options struct {
 	// 开发模式
@@ -23,24 +27,43 @@ type Options struct {
 	WriteFile bool
 	// 是否打印到控制台
 	WriteConsole bool
+	// 是否按日志级别输出至不同文件
+	WriteWithLevel bool
+	// error 日志文件
+	ErrorFileName string
+	// info 日志文件
+	InfoFileName string
+	// debug 日志文件
+	DebugFileName string
+	// warn 日志文件
+	WarnFileName string
 }
 
 type LoggerOptions func(*Options)
 
 func newOptions(opts ...LoggerOptions) *Options {
 	opt := &Options{
-		Development:  true,
-		ServiceName:  DefaultAppName,
-		MaxSize:      DefaultMaxSize,
-		MaxBackups:   60,
-		MaxAge:       30,
-		Level:        "debug",
-		CtxKey:       "hlog-ctx",
-		WriteFile:    false,
-		WriteConsole: true,
+		Development:    false,
+		ServiceName:    DefaultAppName,
+		MaxSize:        DefaultMaxSize,
+		MaxBackups:     60,
+		MaxAge:         30,
+		Level:          "debug",
+		CtxKey:         "hlog-ctx",
+		WriteFile:      true,
+		WriteConsole:   true,
+		WriteWithLevel: false,
+		ErrorFileName:  "error.log",
+		WarnFileName:   "warn.log",
+		InfoFileName:   "info.log",
+		DebugFileName:  "debug.log",
 	}
-	opt.LogFileDir, _ = filepath.Abs(filepath.Dir(filepath.Join(".")))
-	opt.LogFileDir += "/logs/"
+	var err error
+	opt.LogFileDir, err = filepath.Abs(filepath.Dir(filepath.Join(".")))
+	if err != nil {
+
+	}
+	opt.LogFileDir += sp + "logs" + sp
 	for _, o := range opts {
 		o(opt)
 	}
